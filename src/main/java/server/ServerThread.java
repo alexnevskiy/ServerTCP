@@ -6,71 +6,154 @@ import protocol.Message;
 import protocol.MessageWithFile;
 
 import java.io.*;
-import java.net.ServerSocket;
-import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
 import java.util.*;
 
 import static phrases.Phrases.*;
 
 public class ServerThread extends Thread {
-    private final ServerSocket server;
-    private final List<DataWriter> dataWriterList;
-    private final List<ClientThread> clientThreadList;
-    private final Map<String,User> users;
+    private final ServerSocketChannel server;
+    private final DataReader dataReader;
+    private final DataWriter dataWriter;
+    private final LinkedList<SocketChannel> unregisteredUsers;
+    private final Map<SocketChannel,String> users;
+    private final Selector selector;
+    private final ByteBuffer sharedBuffer;
 
-    public ServerThread(ServerSocket server) {
+    public ServerThread(ServerSocketChannel server) throws IOException {
         this.server = server;
-        this.dataWriterList = new LinkedList<>();
-        this.clientThreadList = new LinkedList<>();
-        this.users = new HashMap<>();
+        users = new HashMap<>();
+        unregisteredUsers = new LinkedList<>();
+        sharedBuffer = ByteBuffer.allocateDirect(Integer.MAX_VALUE);
+        dataReader = new DataReader(sharedBuffer);
+        dataWriter = new DataWriter(sharedBuffer);
+        selector = Selector.open();
+        this.server.register(selector, SelectionKey.OP_ACCEPT);
     }
 
     @Override
     public void run() {
-        while (!server.isClosed()) {
+        while (server.isOpen()) {
             try {
-                Socket socket = server.accept();
-                DataReader dataReader = new DataReader(socket.getInputStream());
-                DataWriter dataWriter = new DataWriter(socket.getOutputStream());
-
-                boolean isAdded = false;
-                while (!isAdded) {
-                    if (dataReader.hasMessage()) {
-                        MessageWithFile messageWithFile = dataReader.read();
-                        String userName = messageWithFile.getMessage().getText();
-                        String time = Server.simpleDateFormat.format(new Date());
-                        if (users.containsKey(userName)) {
-                            MessageWithFile messageToUser = new MessageWithFile(
-                                    new Message(time,SERVER.getPhrase(),NAME_IS_TAKEN.getPhrase(),null,null),
-                                    null);
-                            dataWriter.write(messageToUser);
-                        } else {
-                            User user = new User(socket,userName);
-                            users.put(userName,user);
-                            dataWriterList.add(dataWriter);
-
-                            ClientThread clientThread = new ClientThread(dataReader,dataWriter,dataWriterList,user,users);
-                            clientThread.start();
-                            clientThreadList.add(clientThread);
-
-                            MessageWithFile messageToUser = new MessageWithFile(
-                                    new Message(time,SERVER.getPhrase(),WELCOME.getPhrase() + userName,null,null),
-                                    null);
-                            Server.printMessage(messageToUser);
-                            for (DataWriter writer : dataWriterList) {
-                                writer.write(messageToUser);
-                            }
-                            isAdded = true;
-                        }
+                int readyChannels = selector.selectNow();
+                if (readyChannels == 0) {
+                    continue;
+                }
+                Iterator<SelectionKey> selectedKeys = selector.selectedKeys().iterator();
+                while (selectedKeys.hasNext()) {
+                    SelectionKey key = selectedKeys.next();
+                    selectedKeys.remove();
+                    if (!key.isValid()) {
+                        continue;
+                    }
+                    if (key.isAcceptable()) {
+                        accept(key);
+                    } else if (key.isReadable()) {
+                        read(key);
                     }
                 }
             } catch (IOException exception) {
                 System.out.println("Сервер выключен.");
             }
         }
+        try {
+            selector.close();
+            for (SocketChannel client : users.keySet()) {
+                client.close();
+            }
+        } catch (IOException exception) {
+            exception.printStackTrace();
+        }
     }
 
-    public Map<String, User> getUsers() {
+    private void accept(SelectionKey key) {
+        ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
+
+        SocketChannel socketChannel;
+        try {
+            socketChannel = serverSocketChannel.accept();
+
+            socketChannel.configureBlocking(false);
+            socketChannel.register(selector, SelectionKey.OP_READ);
+            unregisteredUsers.add(socketChannel);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void read(SelectionKey key) {
+        SocketChannel socketChannel = (SocketChannel) key.channel();
+        sharedBuffer.clear();
+
+        try {
+            if (dataReader.hasMessage(socketChannel)) {
+                MessageWithFile messageWithFile = dataReader.read(socketChannel);
+                if (unregisteredUsers.contains(socketChannel)) {
+                    String userName = messageWithFile.getMessage().getText();
+                    String time = Server.simpleDateFormat.format(new Date());
+                    if (users.containsValue(userName)) {
+                        MessageWithFile messageToUser = new MessageWithFile(
+                                new Message(time, SERVER.getPhrase(), NAME_IS_TAKEN.getPhrase(), null, null),
+                                null);
+                        dataWriter.write(messageToUser, socketChannel);
+                    } else {
+                        unregisteredUsers.remove(socketChannel);
+                        users.put(socketChannel, userName);
+
+                        MessageWithFile messageToUser = new MessageWithFile(
+                                new Message(time, SERVER.getPhrase(), WELCOME.getPhrase() + userName, null, null),
+                                null);
+                        Server.printMessage(messageToUser);
+                        for (SocketChannel client : users.keySet()) {
+                            dataWriter.write(messageToUser, client);
+                        }
+                    }
+                } else {
+                    if (messageWithFile != null) {
+                        String time = Server.simpleDateFormat.format(new Date());
+                        if (messageWithFile.getMessage().getText().trim().equals(EXIT.getPhrase())) {
+                            socketChannel.close();
+                            key.cancel();
+                            messageWithFile = new MessageWithFile(
+                                    new Message(time, SERVER.getPhrase(),users.get(socketChannel) +
+                                            USER_DISCONNECT.getPhrase(), null, null), null);
+                            users.remove(socketChannel);
+                            Server.printMessage(messageWithFile);
+                            for (SocketChannel client : users.keySet()) {
+                                dataWriter.write(messageWithFile, client);
+                            }
+                        } else {
+                            messageWithFile.getMessage().setTime(time);
+                            messageWithFile.getMessage().setName(users.get(socketChannel));
+                            Server.printMessage(messageWithFile);
+                            for (SocketChannel client : users.keySet()) {
+                                dataWriter.write(messageWithFile, client);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (IOException exception) {
+            try {
+                socketChannel.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            key.cancel();
+            String time = Server.simpleDateFormat.format(new Date());
+            MessageWithFile messageWithFile = new MessageWithFile(
+                    new Message(time, SERVER.getPhrase(),users.get(socketChannel) +
+                            USER_DISCONNECT.getPhrase(), null, null), null);
+            users.remove(socketChannel);
+            Server.printMessage(messageWithFile);
+            for (SocketChannel client : users.keySet()) {
+                dataWriter.write(messageWithFile, client);
+            }
+        }
+    }
+
+    public Map<SocketChannel,String> getUsers() {
         return users;
     }
 
@@ -79,22 +162,11 @@ public class ServerThread extends Thread {
         MessageWithFile messageToUser = new MessageWithFile(
                 new Message(time,SERVER.getPhrase(),SERVER_CLOSED.getPhrase(),null,null), null);
         Server.printMessage(messageToUser);
-
-        for (DataWriter writer : dataWriterList) {
-            writer.write(messageToUser);
-        }
-
-        for (ClientThread clientThread : clientThreadList) {
-            clientThread.closeClientThread();
-            try {
-                clientThread.join();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
+        for (SocketChannel client : users.keySet()) {
+            dataWriter.write(messageToUser, client);
         }
 
         try {
-            System.out.println();
             server.close();
         } catch (IOException exception) {
             exception.printStackTrace();

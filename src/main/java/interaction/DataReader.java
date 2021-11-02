@@ -3,73 +3,76 @@ package interaction;
 import protocol.Message;
 import protocol.MessageWithFile;
 
-import java.io.DataInputStream;
 import java.io.IOException;
-import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 
 public class DataReader {
-    private final DataInputStream inputStream;
+    private final ByteBuffer sharedBuffer;
 
-    public DataReader(InputStream inputStream) {
-        this.inputStream = new DataInputStream(inputStream);
+    public DataReader(ByteBuffer sharedBuffer) {
+        this.sharedBuffer = sharedBuffer;
     }
 
-    public MessageWithFile read() {
-        Message message = readMessageFromStream();
+    public MessageWithFile read(SocketChannel socketChannel) {
+        Message message = readMessageFromStream(socketChannel);
         byte[] file = null;
         if (message.getFileName() != null && message.getFileSize() != null) {
-            file = readFileFromStream(message.getFileSize());
+            file = readFileFromStream(message.getFileSize(), socketChannel);
         }
         return new MessageWithFile(message,file);
     }
 
-    private Message readMessageFromStream() {
+    private Message readMessageFromStream(SocketChannel socketChannel) {
         int messageSize = 0;
+        sharedBuffer.position(sharedBuffer.limit());
+        sharedBuffer.limit(4);
         try {
+            while (sharedBuffer.hasRemaining()) {
+                socketChannel.read(sharedBuffer);
+            }
             for (int i = 0; i < 4; i++) {
                 messageSize = messageSize << 8;
-                messageSize += inputStream.read();
+                messageSize += sharedBuffer.get(i) & 0xFF;
             }
         } catch (IOException exception) {
             exception.printStackTrace();
         }
+
+        sharedBuffer.clear();
+        sharedBuffer.limit(messageSize);
         byte[] messageBytes = new byte[messageSize];
-        for (int i = 0; i < messageSize; i++) {
-            try {
-                messageBytes[i] = inputStream.readByte();
-            } catch (IOException exception) {
-                exception.printStackTrace();
-            }
-        }
+        readFromBuffer(socketChannel, messageBytes);
+
         return Message.toMessage(messageBytes);
     }
 
-    private byte[] readFileFromStream(int fileSize) {
+    private byte[] readFileFromStream(int fileSize, SocketChannel socketChannel) {
         byte[] file = new byte[fileSize];
-        for (int i = 0; i < fileSize; i++) {
-            try {
-                file[i] = inputStream.readByte();
-            } catch (IOException exception) {
-                exception.printStackTrace();
-            }
-        }
+        sharedBuffer.limit(fileSize);
+        readFromBuffer(socketChannel, file);
+
         return file;
     }
 
-    public boolean hasMessage() {
+    private void readFromBuffer(SocketChannel socketChannel, byte[] bytes) {
         try {
-            return inputStream.available() > 0;
+            while (sharedBuffer.hasRemaining()) {
+                socketChannel.read(sharedBuffer);
+            }
+            for (int i = 0; i < sharedBuffer.limit(); i++) {
+                bytes[i] = sharedBuffer.get(i);
+            }
         } catch (IOException exception) {
             exception.printStackTrace();
         }
-        return false;
+        sharedBuffer.clear();
     }
 
-    public void close() {
-        try {
-            inputStream.close();
-        } catch (IOException exception) {
-            exception.printStackTrace();
-        }
+    public boolean hasMessage(SocketChannel socketChannel) throws IOException {
+        sharedBuffer.limit(4);
+        socketChannel.read(sharedBuffer);
+        sharedBuffer.flip();
+        return sharedBuffer.hasRemaining();
     }
 }

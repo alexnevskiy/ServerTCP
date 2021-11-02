@@ -4,7 +4,8 @@ import phrases.Phrases;
 import protocol.MessageWithFile;
 
 import java.io.IOException;
-import java.net.ServerSocket;
+import java.net.InetSocketAddress;
+import java.nio.channels.ServerSocketChannel;
 import java.text.SimpleDateFormat;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -25,7 +26,9 @@ public class Server {
     public void start() throws IOException {
         String pattern = "yyyy-MM-dd'T'HH:mm:ssZ";
         simpleDateFormat = new SimpleDateFormat(pattern);
-        try (ServerSocket server = new ServerSocket(port)) {
+        try (ServerSocketChannel server = ServerSocketChannel.open()) {
+            server.configureBlocking(false);
+            server.socket().bind(new InetSocketAddress(port));
             serverThread = new ServerThread(server);
             serverThread.start();
 
@@ -62,7 +65,7 @@ public class Server {
                             System.out.println(Phrases.COMMANDS.getPhrase());
                             break;
                         case USERS:
-                            System.out.println(serverThread.getUsers().keySet());
+                            System.out.println(serverThread.getUsers().values());
                             break;
                     }
                 }

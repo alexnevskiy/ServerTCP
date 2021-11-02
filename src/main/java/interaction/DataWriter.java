@@ -3,48 +3,55 @@ package interaction;
 import protocol.Message;
 import protocol.MessageWithFile;
 
-import java.io.DataOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 
 public class DataWriter {
-    private final DataOutputStream outputStream;
+    private final ByteBuffer sharedBuffer;
 
-    public DataWriter(OutputStream outputStream) {
-        this.outputStream = new DataOutputStream(outputStream);
+    public DataWriter(ByteBuffer sharedBuffer) {
+        this.sharedBuffer = sharedBuffer;
     }
 
-    public void write(MessageWithFile messageWithFile) {
+    public void write(MessageWithFile messageWithFile, SocketChannel socketChannel) {
         Message message = messageWithFile.getMessage();
         try {
-            writeMessageInStream(message);
+            writeMessageInStream(message, socketChannel);
             if (message.getFileName() != null && message.getFileSize() != null) {
-               writeFileInStream(messageWithFile.getFile());
+               writeFileInStream(messageWithFile.getFile(), socketChannel);
             }
-            outputStream.flush();
         } catch (IOException exception) {
             exception.printStackTrace();
         }
     }
 
-    private void writeMessageInStream(Message message) throws IOException {
+    private void writeMessageInStream(Message message, SocketChannel socketChannel) throws IOException {
         byte[] messageBytes = message.toBytes();
-        outputStream.write(messageBytes.length >> 24);
-        outputStream.write(messageBytes.length >> 16);
-        outputStream.write(messageBytes.length >> 8);
-        outputStream.write(messageBytes.length);
-        outputStream.write(messageBytes);
-    }
-
-    private void writeFileInStream(byte[] file) throws IOException {
-        outputStream.write(file);
-    }
-
-    public void close() {
-        try {
-            outputStream.close();
-        } catch (IOException exception) {
-            exception.printStackTrace();
+        sharedBuffer.put((byte) (messageBytes.length >> 24));
+        sharedBuffer.put((byte) (messageBytes.length >> 16));
+        sharedBuffer.put((byte) (messageBytes.length >> 8));
+        sharedBuffer.put((byte) messageBytes.length);
+        sharedBuffer.flip();
+        while (sharedBuffer.hasRemaining()) {
+            socketChannel.write(sharedBuffer);
         }
+        sharedBuffer.clear();
+
+        sharedBuffer.put(messageBytes);
+        sharedBuffer.flip();
+        while (sharedBuffer.hasRemaining()) {
+            socketChannel.write(sharedBuffer);
+        }
+        sharedBuffer.clear();
+    }
+
+    private void writeFileInStream(byte[] file, SocketChannel socketChannel) throws IOException {
+        sharedBuffer.put(file);
+        sharedBuffer.flip();
+        while (sharedBuffer.hasRemaining()) {
+            socketChannel.write(sharedBuffer);
+        }
+        sharedBuffer.clear();
     }
 }
