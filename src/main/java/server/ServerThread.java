@@ -20,7 +20,7 @@ public class ServerThread extends Thread {
 
     public ServerThread(ServerSocket server) {
         this.server = server;
-        this.dataWriterList = new LinkedList<>();
+        this.dataWriterList = Collections.synchronizedList(new LinkedList<>());
         this.clientThreadList = new LinkedList<>();
         this.users = new HashMap<>();
     }
